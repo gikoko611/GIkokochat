@@ -357,11 +357,21 @@ private fun ChatApp(activity: Activity) {
             )
         }
 
-        Row(
-            Modifier.fillMaxWidth().padding(10.dp)
-                .background(Panel, RoundedCornerShape(18.dp)).padding(5.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            shape = RoundedCornerShape(26.dp),
+            color = Color(0xFF0B1927),
+            border = androidx.compose.foundation.BorderStroke(
+                1.dp, Color(0xFF3A321E)
+            ),
+            shadowElevation = 5.dp
         ) {
+            Row(
+                Modifier.fillMaxWidth().padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
             TextButton(
                 onClick = { filePicker.launch(arrayOf("text/*", "application/json", "application/xml")) },
                 enabled = !loading
@@ -370,8 +380,24 @@ private fun ChatApp(activity: Activity) {
             OutlinedTextField(
                 value = draft,
                 onValueChange = { draft = it },
-                modifier = Modifier.weight(1f),
-                placeholder = { Text("Message G.I…", color = Muted) },
+                modifier = Modifier.weight(1f).padding(vertical = 2.dp),
+                placeholder = {
+                    Text("Message G.I…", color = Muted)
+                },
+                shape = RoundedCornerShape(20.dp),
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = Color(0xFF101F2E),
+                    unfocusedContainerColor = Color(0xFF101F2E),
+                    disabledContainerColor = Color(0xFF101F2E),
+                    focusedIndicatorColor = Gold,
+                    unfocusedIndicatorColor = Color(0xFF30445A),
+                    disabledIndicatorColor = Color(0xFF30445A),
+                    cursorColor = Gold,
+                    focusedTextColor = White,
+                    unfocusedTextColor = White,
+                    focusedPlaceholderColor = Muted,
+                    unfocusedPlaceholderColor = Muted
+                ),
                 enabled = !loading,
                 maxLines = 5
             )
@@ -430,7 +456,10 @@ private fun ChatApp(activity: Activity) {
                         }
                     }.start()
                 }
-            ) { Text("Send", color = Gold, fontWeight = FontWeight.Bold) }
+            ) {
+                Text("Send  ➤", color = Gold, fontWeight = FontWeight.Bold)
+            }
+            }
         }
 
         Text(
