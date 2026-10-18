@@ -57,6 +57,14 @@ class MainActivity : ComponentActivity() {
 
 private data class ChatMessage(val role: String, val content: String)
 
+private data class ApiResult(
+    val content: String,
+    val promptTokens: Int?,
+    val completionTokens: Int?,
+    val totalTokens: Int?,
+    val rateLimitSummary: String
+)
+
 private object SecureKey {
     private const val ALIAS = "gi_koko_openai_key_v1"
 
@@ -131,7 +139,7 @@ private fun requestOpenAI(
     model: String,
     systemPrompt: String,
     history: List<ChatMessage>
-): String {
+): ApiResult {
     val url = URL(base.trimEnd('/') + "/chat/completions")
     val connection = (url.openConnection() as HttpURLConnection).apply {
         requestMethod = "POST"
@@ -175,7 +183,36 @@ private fun requestOpenAI(
             .orEmpty()
 
         if (result.isBlank()) throw IOException("API returned an empty response.")
-        return result
+
+        val usage = JSONObject(text).optJSONObject("usage")
+        val promptTokens = usage?.takeIf {
+            it.has("prompt_tokens") && !it.isNull("prompt_tokens")
+        }?.optInt("prompt_tokens")
+        val completionTokens = usage?.takeIf {
+            it.has("completion_tokens") && !it.isNull("completion_tokens")
+        }?.optInt("completion_tokens")
+        val totalTokens = usage?.takeIf {
+            it.has("total_tokens") && !it.isNull("total_tokens")
+        }?.optInt("total_tokens")
+
+        val headerNames = listOf(
+            "x-ratelimit-remaining-requests" to "Requests remaining",
+            "x-ratelimit-limit-requests" to "Request limit",
+            "x-ratelimit-remaining-tokens" to "Tokens remaining",
+            "x-ratelimit-limit-tokens" to "Token limit",
+            "x-ratelimit-reset-requests" to "Request reset",
+            "x-ratelimit-reset-tokens" to "Token reset",
+            "retry-after" to "Retry after"
+        )
+        val rateLimitSummary = headerNames.mapNotNull { (header, label) ->
+            connection.getHeaderField(header)
+                ?.takeIf { it.isNotBlank() }
+                ?.let { "$label: $it" }
+        }.joinToString(" · ").ifBlank { "Not provided by provider" }
+
+        return ApiResult(
+            result, promptTokens, completionTokens, totalTokens, rateLimitSummary
+        )
     } finally {
         connection.disconnect()
     }
@@ -223,6 +260,17 @@ private fun ChatApp(activity: Activity) {
     var error by remember { mutableStateOf("") }
     var attachmentText by remember { mutableStateOf("") }
     var attachmentName by remember { mutableStateOf("") }
+
+    var totalPromptTokens by remember { mutableStateOf(preferences.getInt("usage_prompt_total", 0)) }
+    var totalCompletionTokens by remember { mutableStateOf(preferences.getInt("usage_completion_total", 0)) }
+    var totalTokens by remember { mutableStateOf(preferences.getInt("usage_total", 0)) }
+    var requestCount by remember { mutableStateOf(preferences.getInt("usage_request_count", 0)) }
+    var lastPromptTokens by remember { mutableStateOf(preferences.getInt("usage_last_prompt", -1)) }
+    var lastCompletionTokens by remember { mutableStateOf(preferences.getInt("usage_last_completion", -1)) }
+    var lastTotalTokens by remember { mutableStateOf(preferences.getInt("usage_last_total", -1)) }
+    var rateLimitSummary by remember {
+        mutableStateOf(preferences.getString("usage_rate_limits", "Not provided by provider").orEmpty())
+    }
 
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -307,6 +355,33 @@ private fun ChatApp(activity: Activity) {
                 color = Muted,
                 modifier = Modifier.padding(horizontal = 14.dp)
             )
+        }
+
+        Surface(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            color = Panel,
+            shape = RoundedCornerShape(18.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF3A321E))
+        ) {
+            Column(
+                Modifier.fillMaxWidth().padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                Text("G.I USAGE DASHBOARD", color = Gold, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                Text(
+                    "Input: $totalPromptTokens · Output: $totalCompletionTokens · Total: $totalTokens tokens",
+                    color = White, fontSize = 12.sp
+                )
+                Text(
+                    if (lastTotalTokens >= 0)
+                        "Last request: in $lastPromptTokens / out $lastCompletionTokens / total $lastTotalTokens tokens"
+                    else "Last request: token usage unavailable",
+                    color = Muted, fontSize = 11.sp
+                )
+                Text("Successful requests tracked: $requestCount", color = Muted, fontSize = 11.sp)
+                Text("Rate limits: $rateLimitSummary", color = Muted, fontSize = 10.sp)
+                Text("API credit balance: Not available from generic endpoint", color = Muted, fontSize = 10.sp)
+            }
         }
 
         LazyColumn(
@@ -439,13 +514,39 @@ private fun ChatApp(activity: Activity) {
 
                     Thread {
                         try {
-                            val answer = requestOpenAI(
+                            val result = requestOpenAI(
                                 requestBase, requestKey, requestModel,
                                 requestPrompt, requestHistory
                             )
                             activity.runOnUiThread {
-                                messages.add(ChatMessage("assistant", answer))
+                                messages.add(ChatMessage("assistant", result.content))
                                 saveHistory(context, messages)
+
+                                requestCount += 1
+                                result.promptTokens?.let {
+                                    totalPromptTokens += it
+                                    lastPromptTokens = it
+                                }
+                                result.completionTokens?.let {
+                                    totalCompletionTokens += it
+                                    lastCompletionTokens = it
+                                }
+                                result.totalTokens?.let {
+                                    totalTokens += it
+                                    lastTotalTokens = it
+                                }
+                                rateLimitSummary = result.rateLimitSummary
+
+                                preferences.edit()
+                                    .putInt("usage_prompt_total", totalPromptTokens)
+                                    .putInt("usage_completion_total", totalCompletionTokens)
+                                    .putInt("usage_total", totalTokens)
+                                    .putInt("usage_request_count", requestCount)
+                                    .putInt("usage_last_prompt", lastPromptTokens)
+                                    .putInt("usage_last_completion", lastCompletionTokens)
+                                    .putInt("usage_last_total", lastTotalTokens)
+                                    .putString("usage_rate_limits", rateLimitSummary)
+                                    .apply()
                                 loading = false
                             }
                         } catch (e: Exception) {
