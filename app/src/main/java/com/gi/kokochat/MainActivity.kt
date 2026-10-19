@@ -30,6 +30,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -728,15 +731,33 @@ private fun ChatApp(activity: Activity) {
         else -> modePrompt
     }
 
-    Column(Modifier.fillMaxSize().background(Bg)) {
+    Box(Modifier.fillMaxSize().background(Bg)) {
+        Image(
+            painter = painterResource(R.drawable.gi_landscape_background),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+            alpha = 0.30f
+        )
+        Column(
+            Modifier
+                .fillMaxSize()
+                .background(Color(0x66100B12))
+        ) {
         Row(
-            Modifier.fillMaxWidth().background(Color(0xFF19111B)).padding(14.dp),
+            Modifier.fillMaxWidth().background(Color(0xE6100B12)).padding(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            Image(
+                painter = painterResource(R.drawable.gi_3d_logo_concept),
+                contentDescription = "G.I logo",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.size(44.dp)
+            )
             Column(Modifier.weight(1f)) {
                 Text("G.I KO KO CHAT", color = Gold, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Text("$model · $mode", color = Muted, fontSize = 12.sp)
-                Text("✿ ❀ ✿  မြန်မာရွှေပန်းနွယ်  ✿ ❀ ✿", color = Gold, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                Text("AI Chat Assistant", color = Muted, fontSize = 11.sp)
             }
             TextButton(
                 onClick = {
@@ -843,16 +864,16 @@ private fun ChatApp(activity: Activity) {
             )
         }
 
-        Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp)) {
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 10.dp, vertical = 4.dp)) {
             modes.forEach { item ->
                 TextButton(
                     onClick = { mode = item; preferences.edit().putString("mode", item).apply() },
                     enabled = !loading,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.padding(horizontal = 3.dp)
                 ) {
                     Text(
                         item,
-                        fontSize = 9.sp,
+                        fontSize = 11.sp,
                         color = if (mode == item) Gold else Muted
                     )
                 }
@@ -871,13 +892,13 @@ private fun ChatApp(activity: Activity) {
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
             color = Panel,
             shape = RoundedCornerShape(18.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF3A321E))
+            border = androidx.compose.foundation.BorderStroke(1.5.dp, Gold.copy(alpha = 0.85f))
         ) {
             Column(
                 Modifier.fillMaxWidth().padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(5.dp)
             ) {
-                Text("✿  G.I USAGE DASHBOARD  ✿", color = Gold, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                Text("USAGE DASHBOARD", color = Gold, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 Text(
                     "Input: $totalPromptTokens · Output: $totalCompletionTokens · Total: $totalTokens tokens",
                     color = White, fontSize = 12.sp
@@ -1055,7 +1076,7 @@ private fun ChatApp(activity: Activity) {
             shape = RoundedCornerShape(26.dp),
             color = Color(0xFF19111B),
             border = androidx.compose.foundation.BorderStroke(
-                1.dp, Color(0xFF3A321E)
+                1.5.dp, Gold.copy(alpha = 0.85f)
             ),
             shadowElevation = 5.dp
         ) {
@@ -1287,7 +1308,7 @@ private fun ChatApp(activity: Activity) {
             onDismissRequest = {
                 if (!imageLoading) imageStudioOpen = false
             },
-            title = { Text("✿ G.I IMAGE STUDIO ✿", color = Gold) },
+            title = { Text("G.I IMAGE STUDIO", color = Gold) },
             text = {
                 Column(
                     Modifier
@@ -1485,3 +1506,4 @@ private fun ChatApp(activity: Activity) {
     }
 
 }
+    }
