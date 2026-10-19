@@ -1,5 +1,12 @@
 package com.gi.kokochat
 
+import java.io.File
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.foundation.Image
+import java.io.ByteArrayOutputStream
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
+import android.graphics.BitmapFactory
 import android.app.Activity
 import android.os.Bundle
 import android.net.Uri
@@ -13,6 +20,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -33,17 +41,18 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.io.IOException
+import java.util.UUID
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-private val Bg = Color(0xFF07111E)
-private val Panel = Color(0xFF102236)
-private val Gold = Color(0xFFFFC43D)
-private val White = Color(0xFFEDF5FF)
-private val Muted = Color(0xFF91A8BC)
+private val Bg = Color(0xFF100B12)
+private val Panel = Color(0xFF211722)
+private val Gold = Color(0xFFE8C36A)
+private val White = Color(0xFFFFF5E5)
+private val Muted = Color(0xFFB9A993)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -125,12 +134,258 @@ private fun loadHistory(context: Context): List<ChatMessage> {
     } catch (_: Exception) { emptyList() }
 }
 
+private data class ChatSession(
+    val id: String,
+    val title: String,
+    val updatedAt: Long,
+    val messages: List<ChatMessage>
+)
+
+private const val WELCOME_MESSAGE =
+    "မင်္ဂလာပါ။ G.I KO KO CHAT မှ ကြိုဆိုပါတယ်။ Settings ထဲမှာ OpenAI API key ထည့်ပြီး စတင်အသုံးပြုနိုင်ပါတယ်။"
+
+private fun sessionTitle(messages: List<ChatMessage>): String {
+    val firstUser = messages.firstOrNull { it.role == "user" }?.content
+        ?.replace(Regex("\\s+"), " ")
+        ?.trim()
+        .orEmpty()
+    if (firstUser.isBlank()) return "New chat"
+    return if (firstUser.length > 36) firstUser.take(36).trimEnd() + "…" else firstUser
+}
+
+private fun saveSessions(context: Context, sessions: List<ChatSession>) {
+    val array = JSONArray()
+
+    sessions.take(50).forEach { session ->
+        val messageArray = JSONArray()
+
+        session.messages.takeLast(200).forEach { message ->
+            messageArray.put(
+                JSONObject()
+                    .put("role", message.role)
+                    .put("content", message.content)
+            )
+        }
+
+        array.put(
+            JSONObject()
+                .put("id", session.id)
+                .put("title", session.title)
+                .put("updatedAt", session.updatedAt)
+                .put("messages", messageArray)
+        )
+    }
+
+    prefs(context)
+        .edit()
+        .putString("sessions_v1", array.toString())
+        .apply()
+}
+
+private fun loadSessions(context: Context): List<ChatSession> {
+    val stored = prefs(context).getString("sessions_v1", null)
+
+    if (!stored.isNullOrBlank()) {
+        try {
+            val array = JSONArray(stored)
+
+            val loaded = (0 until array.length()).mapNotNull { i ->
+                val obj = array.optJSONObject(i)
+                    ?: return@mapNotNull null
+
+                val id = obj.optString("id")
+                    .takeIf { it.isNotBlank() }
+                    ?: return@mapNotNull null
+
+                val rawMessages = obj.optJSONArray("messages")
+                    ?: JSONArray()
+
+                val parsedMessages = (0 until rawMessages.length()).mapNotNull { j ->
+                    val item = rawMessages.optJSONObject(j)
+                        ?: return@mapNotNull null
+
+                    val role = item.optString("role")
+                    if (role != "user" && role != "assistant") {
+                        return@mapNotNull null
+                    }
+
+                    ChatMessage(role, item.optString("content"))
+                }.takeLast(200)
+
+                ChatSession(
+                    id = id,
+                    title = obj.optString("title").ifBlank { "New chat" },
+                    updatedAt = obj.optLong("updatedAt", 0L),
+                    messages = parsedMessages
+                )
+            }.sortedByDescending { it.updatedAt }.take(50)
+
+            if (loaded.isNotEmpty()) return loaded
+        } catch (_: Exception) {
+            // Fall back to legacy history if session data is invalid.
+        }
+    }
+
+    val oldMessages = loadHistory(context)
+
+    val migrated = ChatSession(
+        id = UUID.randomUUID().toString(),
+        title = sessionTitle(oldMessages),
+        updatedAt = System.currentTimeMillis(),
+        messages = oldMessages.ifEmpty {
+            listOf(ChatMessage("assistant", WELCOME_MESSAGE))
+        }
+    )
+
+    saveSessions(context, listOf(migrated))
+    return listOf(migrated)
+}
+
 private fun saveHistory(context: Context, messages: List<ChatMessage>) {
+    // Keep the old history as a compatibility backup.
     val array = JSONArray()
     messages.takeLast(200).forEach {
         array.put(JSONObject().put("role", it.role).put("content", it.content))
     }
     prefs(context).edit().putString("history", array.toString()).apply()
+}
+
+
+private data class GeneratedImage(
+    val path: String,
+    val prompt: String,
+    val createdAt: Long
+)
+
+private fun loadGeneratedImages(context: Context): List<GeneratedImage> {
+    val dir = File(context.filesDir, "gi_images")
+    if (!dir.exists()) return emptyList()
+
+    return dir.listFiles()
+        ?.filter { it.isFile && it.extension.equals("png", true) }
+        ?.sortedByDescending { it.lastModified() }
+        ?.take(30)
+        ?.map { file ->
+            val promptFile = File(file.parentFile, "${file.nameWithoutExtension}.txt")
+            GeneratedImage(
+                path = file.absolutePath,
+                prompt = try {
+                    promptFile.readText(Charsets.UTF_8)
+                } catch (_: Exception) {
+                    ""
+                },
+                createdAt = file.lastModified()
+            )
+        }
+        .orEmpty()
+}
+
+private fun normalizeImageToPng(bytes: ByteArray): ByteArray {
+    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        ?: throw IOException("Image API returned invalid or unsupported image data.")
+
+    try {
+        val output = ByteArrayOutputStream()
+        val success = bitmap.compress(
+            android.graphics.Bitmap.CompressFormat.PNG,
+            100,
+            output
+        )
+        if (!success) {
+            throw IOException("Could not convert the generated image to PNG.")
+        }
+        return output.toByteArray()
+    } finally {
+        bitmap.recycle()
+    }
+}
+
+private fun generateImageOpenAI(
+    base: String,
+    apiKey: String,
+    model: String,
+    prompt: String
+): ByteArray {
+    val endpoint = base.trimEnd('/') + "/images/generations"
+    val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+        requestMethod = "POST"
+        connectTimeout = 30000
+        readTimeout = 180000
+        doOutput = true
+        setRequestProperty("Authorization", "Bearer $apiKey")
+        setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        setRequestProperty("Accept", "application/json")
+    }
+
+    try {
+        val body = JSONObject()
+            .put("model", model)
+            .put("prompt", prompt)
+            .put("n", 1)
+            .put("size", "1024x1024")
+
+        connection.outputStream.use {
+            it.write(body.toString().toByteArray(Charsets.UTF_8))
+        }
+
+        val status = connection.responseCode
+        val stream = if (status in 200..299) connection.inputStream
+                     else connection.errorStream
+        val responseText = stream?.bufferedReader(Charsets.UTF_8)
+            ?.use { it.readText() }.orEmpty()
+
+        if (status !in 200..299) {
+            val message = try {
+                JSONObject(responseText).optJSONObject("error")
+                    ?.optString("message")
+            } catch (_: Exception) {
+                null
+            }
+            throw IOException(
+                "Image API HTTP $status: " +
+                    (message?.takeIf { it.isNotBlank() }
+                        ?: responseText.take(600))
+            )
+        }
+
+        val item = JSONObject(responseText)
+            .optJSONArray("data")
+            ?.optJSONObject(0)
+            ?: throw IOException("Image API response has no data[0].")
+
+        val encoded = item.optString("b64_json")
+        if (encoded.isNotBlank() && encoded != "null") {
+            return normalizeImageToPng(Base64.decode(encoded, Base64.DEFAULT))
+        }
+
+        val imageUrl = item.optString("url")
+        if (imageUrl.isNullOrBlank() || imageUrl == "null") {
+            throw IOException(
+                "Image API returned neither b64_json nor url. " +
+                    "Check whether this provider supports the Images API response format."
+            )
+        }
+
+        val imageConnection =
+            (URL(imageUrl).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 20000
+                readTimeout = 90000
+            }
+
+        try {
+            val imageStatus = imageConnection.responseCode
+            if (imageStatus !in 200..299) {
+                throw IOException("Image download HTTP $imageStatus")
+            }
+            return imageConnection.inputStream.use { input ->
+                normalizeImageToPng(input.readBytes())
+            }
+        } finally {
+            imageConnection.disconnect()
+        }
+    } finally {
+        connection.disconnect()
+    }
 }
 
 private fun requestOpenAI(
@@ -223,13 +478,34 @@ private fun ChatApp(activity: Activity) {
     val context = activity
     val preferences = remember { prefs(context) }
 
+    val sessionState = remember {
+        mutableStateListOf<ChatSession>().apply {
+            addAll(loadSessions(context))
+        }
+    }
+    var activeSessionId by remember {
+        mutableStateOf(sessionState.firstOrNull()?.id.orEmpty())
+    }
     val messages = remember {
         mutableStateListOf<ChatMessage>().apply {
-            addAll(loadHistory(context))
-            if (isEmpty()) add(ChatMessage(
-                "assistant",
-                "မင်္ဂလာပါ။ G.I KO KO CHAT မှ ကြိုဆိုပါတယ်။ Settings ထဲမှာ OpenAI API key ထည့်ပြီး စတင်အသုံးပြုနိုင်ပါတယ်။"
-            ))
+            addAll(sessionState.firstOrNull()?.messages.orEmpty())
+        }
+    }
+
+    fun persistActiveSession() {
+        val index = sessionState.indexOfFirst { it.id == activeSessionId }
+        if (index >= 0) {
+            val current = sessionState[index]
+            sessionState[index] = current.copy(
+                title = sessionTitle(messages),
+                updatedAt = System.currentTimeMillis(),
+                messages = messages.toList()
+            )
+            val ordered = sessionState.sortedByDescending { it.updatedAt }.take(50)
+            sessionState.clear()
+            sessionState.addAll(ordered)
+            saveSessions(context, sessionState)
+            saveHistory(context, messages)
         }
     }
 
@@ -256,7 +532,29 @@ private fun ChatApp(activity: Activity) {
         ).orEmpty())
     }
     var settingsOpen by remember { mutableStateOf(false) }
+    var imageStudioOpen by remember { mutableStateOf(false) }
+    var imagePrompt by remember { mutableStateOf("") }
+    var imageApiKey by remember {
+        mutableStateOf(SecureKey.decrypt(preferences.getString("image_api_key", "").orEmpty()))
+    }
+    var imageBaseUrl by remember {
+        mutableStateOf(preferences.getString("image_base_url", "https://api.openai.com/v1").orEmpty())
+    }
+    var imageModel by remember {
+        mutableStateOf(preferences.getString("image_model", "gpt-image-1").orEmpty())
+    }
+    var imageLoading by remember { mutableStateOf(false) }
+    var imageError by remember { mutableStateOf("") }
+    var currentImagePath by remember { mutableStateOf<String?>(null) }
+    val generatedImages = remember {
+        mutableStateListOf<GeneratedImage>().apply {
+            addAll(loadGeneratedImages(context))
+        }
+    }
+    var historyOpen by remember { mutableStateOf(false) }
     var loading by remember { mutableStateOf(false) }
+    var retryHistory by remember { mutableStateOf<List<ChatMessage>?>(null) }
+    var pendingRetryPrompt by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf("") }
     var attachmentText by remember { mutableStateOf("") }
     var attachmentName by remember { mutableStateOf("") }
@@ -305,6 +603,117 @@ private fun ChatApp(activity: Activity) {
         }
     }
 
+    val saveImageLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("image/png")
+    ) { uri: Uri? ->
+        val path = currentImagePath
+        if (uri != null && path != null) {
+            try {
+                val source = File(path)
+                context.contentResolver.openOutputStream(uri)?.use { output ->
+                    source.inputStream().use { input -> input.copyTo(output) }
+                } ?: throw IOException("Cannot open destination file.")
+                imageError = "ပုံကို ဖုန်းထဲ သိမ်းပြီးပါပြီ။"
+            } catch (e: Exception) {
+                imageError = "ပုံသိမ်းမရပါ: ${e.message ?: "unknown error"}"
+            }
+        }
+    }
+
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain")
+    ) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                val transcript = messages.joinToString("\n\n") { message ->
+                    val speaker = if (message.role == "user") "You" else "G.I"
+                    "$speaker:\n${message.content}"
+                }
+                val output = context.contentResolver.openOutputStream(uri)
+                    ?: throw IOException("Cannot open the selected save location.")
+                output.bufferedWriter(Charsets.UTF_8).use { it.write(transcript) }
+                error = "Chat transcript saved successfully."
+            } catch (e: Exception) {
+                error = "Export failed: ${e.message ?: "unknown error"}"
+            }
+        }
+    }
+
+    fun createNewSession() {
+        if (loading) return
+        retryHistory = null
+        pendingRetryPrompt = null
+        error = ""
+        persistActiveSession()
+        val session = ChatSession(
+            id = UUID.randomUUID().toString(),
+            title = "New chat",
+            updatedAt = System.currentTimeMillis(),
+            messages = listOf(ChatMessage("assistant", WELCOME_MESSAGE))
+        )
+        sessionState.add(0, session)
+        while (sessionState.size > 50) sessionState.removeAt(sessionState.lastIndex)
+        activeSessionId = session.id
+        messages.clear()
+        messages.addAll(session.messages)
+        draft = ""
+        attachmentText = ""
+        attachmentName = ""
+        error = ""
+        saveSessions(context, sessionState)
+        saveHistory(context, messages)
+    }
+
+    fun openSession(session: ChatSession) {
+        if (loading || session.id == activeSessionId) return
+        retryHistory = null
+        pendingRetryPrompt = null
+        error = ""
+        persistActiveSession()
+        activeSessionId = session.id
+        messages.clear()
+        messages.addAll(session.messages)
+        draft = ""
+        attachmentText = ""
+        attachmentName = ""
+        error = ""
+        saveHistory(context, messages)
+    }
+
+    fun deleteSession(session: ChatSession) {
+        if (loading) return
+        retryHistory = null
+        pendingRetryPrompt = null
+        error = ""
+        sessionState.removeAll { it.id == session.id }
+        if (session.id == activeSessionId) {
+            val replacement = sessionState.firstOrNull()
+            if (replacement != null) {
+                activeSessionId = replacement.id
+                messages.clear()
+                messages.addAll(replacement.messages)
+            } else {
+                val fresh = ChatSession(
+                    id = UUID.randomUUID().toString(),
+                    title = "New chat",
+                    updatedAt = System.currentTimeMillis(),
+                    messages = listOf(ChatMessage("assistant", WELCOME_MESSAGE))
+                )
+                sessionState.add(fresh)
+                activeSessionId = fresh.id
+                messages.clear()
+                messages.addAll(fresh.messages)
+            }
+            draft = ""
+            attachmentText = ""
+            attachmentName = ""
+            error = ""
+        }
+        saveSessions(context, sessionState)
+        saveHistory(context, messages)
+    }
+
+
     val modes = listOf("Chat", "Translator", "Code Helper", "Summarizer", "Writing Assistant")
     val modePrompt = when (mode) {
         "Translator" -> "Translate accurately. Preserve meaning and formatting. If the target language is unclear, ask briefly."
@@ -321,16 +730,117 @@ private fun ChatApp(activity: Activity) {
 
     Column(Modifier.fillMaxSize().background(Bg)) {
         Row(
-            Modifier.fillMaxWidth().background(Color(0xFF091522)).padding(14.dp),
+            Modifier.fillMaxWidth().background(Color(0xFF19111B)).padding(14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {
                 Text("G.I KO KO CHAT", color = Gold, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Text("$model · $mode", color = Muted, fontSize = 12.sp)
+                Text("✿ ❀ ✿  မြန်မာရွှေပန်းနွယ်  ✿ ❀ ✿", color = Gold, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+            }
+            TextButton(
+                onClick = {
+                    exportLauncher.launch("GI-KO-KO-CHAT-${System.currentTimeMillis()}.txt")
+                },
+                enabled = !loading
+            ) {
+                Text("Export", color = Gold)
             }
             TextButton(onClick = { settingsOpen = true }) {
                 Text("Settings", color = Gold)
             }
+            TextButton(onClick = {
+                imageError = ""
+                imageStudioOpen = true
+            }) {
+                Text("Image", color = Gold)
+            }
+        }
+
+        Row(
+            Modifier.fillMaxWidth().background(Color(0xFF19111B)).padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = { createNewSession() },
+                enabled = !loading,
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text("+ New Chat", color = Gold, fontSize = 12.sp)
+            }
+            OutlinedButton(
+                onClick = { historyOpen = true },
+                enabled = !loading,
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text("History (${sessionState.size})", color = Gold, fontSize = 12.sp)
+            }
+        }
+
+        if (historyOpen) {
+            AlertDialog(
+                onDismissRequest = { historyOpen = false },
+                title = { Text("Chat History", color = Gold) },
+                text = {
+                    if (sessionState.isEmpty()) {
+                        Text("No saved chats yet.", color = White)
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            itemsIndexed(
+                                sessionState,
+                                key = { _, session -> session.id }
+                            ) { _, session ->
+                                Surface(
+                                    color = if (session.id == activeSessionId) Color(0xFF1A3448) else Panel,
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Column(Modifier.fillMaxWidth().padding(8.dp)) {
+                                        Text(
+                                            (if (session.id == activeSessionId) "● " else "") + session.title,
+                                            color = White,
+                                            fontSize = 13.sp,
+                                            maxLines = 2
+                                        )
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.End,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            TextButton(
+                                                onClick = {
+                                                    openSession(session)
+                                                    historyOpen = false
+                                                }
+                                            ) {
+                                                Text("Open", color = Gold)
+                                            }
+                                            TextButton(
+                                                onClick = { deleteSession(session) },
+                                                enabled = !loading
+                                            ) {
+                                                Text("Delete", color = Color(0xFFFF8A80))
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { historyOpen = false }) {
+                        Text("Close", color = Gold)
+                    }
+                },
+                containerColor = Panel,
+                titleContentColor = Gold,
+                textContentColor = White
+            )
         }
 
         Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp)) {
@@ -367,7 +877,7 @@ private fun ChatApp(activity: Activity) {
                 Modifier.fillMaxWidth().padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(5.dp)
             ) {
-                Text("G.I USAGE DASHBOARD", color = Gold, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                Text("✿  G.I USAGE DASHBOARD  ✿", color = Gold, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 Text(
                     "Input: $totalPromptTokens · Output: $totalCompletionTokens · Total: $totalTokens tokens",
                     color = White, fontSize = 12.sp
@@ -396,15 +906,28 @@ private fun ChatApp(activity: Activity) {
                     horizontalAlignment = if (user) Alignment.End else Alignment.Start
                 ) {
                     Surface(
-                        color = if (user) Color(0xFF1456A7) else Panel,
-                        shape = RoundedCornerShape(16.dp),
+                        color = if (user) Color(0xFF65491F) else Panel,
+                        shape = RoundedCornerShape(
+                            topStart = 16.dp,
+                            topEnd = 16.dp,
+                            bottomEnd = if (user) 5.dp else 16.dp,
+                            bottomStart = if (user) 16.dp else 5.dp
+                        ),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            if (user) Gold.copy(alpha = 0.72f)
+                            else Color(0xFF654A5A)
+                        ),
+                        shadowElevation = 3.dp,
                         modifier = Modifier.fillMaxWidth(0.94f)
                     ) {
-                        Text(
-                            message.content,
-                            color = White,
-                            modifier = Modifier.padding(13.dp)
-                        )
+                        SelectionContainer {
+                            Text(
+                                message.content,
+                                color = White,
+                                modifier = Modifier.padding(13.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -423,13 +946,106 @@ private fun ChatApp(activity: Activity) {
             }
         }
 
+        fun retryLastRequest() {
+            val historyToRetry = retryHistory ?: return
+            if (loading) return
+
+            if (apiKey.isBlank()) {
+                error = "Settings ထဲမှာ OpenAI API key ထည့်ပါ။"
+                settingsOpen = true
+                return
+            }
+            if (model.isBlank() || baseUrl.isBlank()) {
+                error = "Model ID နဲ့ API base URL ကို ဖြည့်ပါ။"
+                settingsOpen = true
+                return
+            }
+
+            val retryKey = apiKey
+            val retryModel = model
+            val retryBase = baseUrl
+            val promptToRetry = pendingRetryPrompt ?: effectivePrompt
+
+            loading = true
+            error = ""
+
+            Thread {
+                try {
+                    val result = requestOpenAI(
+                        retryBase,
+                        retryKey,
+                        retryModel,
+                        promptToRetry,
+                        historyToRetry
+                    )
+
+                    activity.runOnUiThread {
+                        messages.add(ChatMessage("assistant", result.content))
+                        persistActiveSession()
+                        requestCount += 1
+
+                        result.promptTokens?.let {
+                            totalPromptTokens += it
+                            lastPromptTokens = it
+                        }
+                        result.completionTokens?.let {
+                            totalCompletionTokens += it
+                            lastCompletionTokens = it
+                        }
+                        result.totalTokens?.let {
+                            totalTokens += it
+                            lastTotalTokens = it
+                        }
+                        rateLimitSummary = result.rateLimitSummary
+                        retryHistory = null
+                        pendingRetryPrompt = null
+
+                        preferences.edit()
+                            .putInt("usage_prompt_total", totalPromptTokens)
+                            .putInt("usage_completion_total", totalCompletionTokens)
+                            .putInt("usage_total", totalTokens)
+                            .putInt("usage_request_count", requestCount)
+                            .putInt("usage_last_prompt", lastPromptTokens)
+                            .putInt("usage_last_completion", lastCompletionTokens)
+                            .putInt("usage_last_total", lastTotalTokens)
+                            .putString("usage_rate_limits", rateLimitSummary)
+                            .apply()
+
+                        loading = false
+                    }
+                } catch (e: Exception) {
+                    activity.runOnUiThread {
+                        error = e.message ?: "Network request failed."
+                        loading = false
+                    }
+                }
+            }.start()
+        }
+
         if (error.isNotBlank()) {
-            Text(
-                error,
-                color = Color(0xFFFF9C8D),
-                fontSize = 12.sp,
+            Column(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp)
-            )
+            ) {
+                Text(
+                    error,
+                    color = Color(0xFFFF9C8D),
+                    fontSize = 12.sp
+                )
+                if (retryHistory != null && !loading) {
+                    Row {
+                        TextButton(onClick = { retryLastRequest() }) {
+                            Text("Retry  ↻", color = Gold, fontWeight = FontWeight.Bold)
+                        }
+                        TextButton(onClick = {
+                            retryHistory = null
+                            pendingRetryPrompt = null
+                            error = ""
+                        }) {
+                            Text("Dismiss", color = Muted)
+                        }
+                    }
+                }
+            }
         }
 
         Surface(
@@ -437,7 +1053,7 @@ private fun ChatApp(activity: Activity) {
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             shape = RoundedCornerShape(26.dp),
-            color = Color(0xFF0B1927),
+            color = Color(0xFF19111B),
             border = androidx.compose.foundation.BorderStroke(
                 1.dp, Color(0xFF3A321E)
             ),
@@ -461,12 +1077,12 @@ private fun ChatApp(activity: Activity) {
                 },
                 shape = RoundedCornerShape(20.dp),
                 colors = TextFieldDefaults.colors(
-                    focusedContainerColor = Color(0xFF101F2E),
-                    unfocusedContainerColor = Color(0xFF101F2E),
-                    disabledContainerColor = Color(0xFF101F2E),
+                    focusedContainerColor = Color(0xFF291D2B),
+                    unfocusedContainerColor = Color(0xFF291D2B),
+                    disabledContainerColor = Color(0xFF291D2B),
                     focusedIndicatorColor = Gold,
-                    unfocusedIndicatorColor = Color(0xFF30445A),
-                    disabledIndicatorColor = Color(0xFF30445A),
+                    unfocusedIndicatorColor = Color(0xFF5B4936),
+                    disabledIndicatorColor = Color(0xFF5B4936),
                     cursorColor = Gold,
                     focusedTextColor = White,
                     unfocusedTextColor = White,
@@ -478,7 +1094,7 @@ private fun ChatApp(activity: Activity) {
             )
 
             TextButton(
-                enabled = !loading && (draft.isNotBlank() || attachmentText.isNotBlank()),
+                enabled = !loading && retryHistory == null && (draft.isNotBlank() || attachmentText.isNotBlank()),
                 onClick = {
                     if (apiKey.isBlank()) {
                         error = "Settings ထဲမှာ OpenAI API key ထည့်ပါ။"
@@ -499,7 +1115,7 @@ private fun ChatApp(activity: Activity) {
                         }
                     }
                     messages.add(ChatMessage("user", userText))
-                    saveHistory(context, messages)
+                    persistActiveSession()
                     draft = ""
                     attachmentText = ""
                     attachmentName = ""
@@ -507,10 +1123,12 @@ private fun ChatApp(activity: Activity) {
                     loading = true
 
                     val requestHistory = messages.toList()
+                    retryHistory = requestHistory
                     val requestKey = apiKey
                     val requestModel = model
                     val requestBase = baseUrl
                     val requestPrompt = effectivePrompt
+                    pendingRetryPrompt = requestPrompt
 
                     Thread {
                         try {
@@ -520,7 +1138,7 @@ private fun ChatApp(activity: Activity) {
                             )
                             activity.runOnUiThread {
                                 messages.add(ChatMessage("assistant", result.content))
-                                saveHistory(context, messages)
+                                persistActiveSession()
 
                                 requestCount += 1
                                 result.promptTokens?.let {
@@ -536,6 +1154,8 @@ private fun ChatApp(activity: Activity) {
                                     lastTotalTokens = it
                                 }
                                 rateLimitSummary = result.rateLimitSummary
+                                retryHistory = null
+                                pendingRetryPrompt = null
 
                                 preferences.edit()
                                     .putInt("usage_prompt_total", totalPromptTokens)
@@ -654,4 +1274,214 @@ private fun ChatApp(activity: Activity) {
             textContentColor = White
         )
     }
+
+    if (imageStudioOpen) {
+        val previewPath = currentImagePath
+        val previewBitmap = remember(previewPath) {
+            previewPath?.let { path ->
+                try { BitmapFactory.decodeFile(path) } catch (_: Exception) { null }
+            }
+        }
+
+        AlertDialog(
+            onDismissRequest = {
+                if (!imageLoading) imageStudioOpen = false
+            },
+            title = { Text("✿ G.I IMAGE STUDIO ✿", color = Gold) },
+            text = {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 560.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = imagePrompt,
+                        onValueChange = { imagePrompt = it },
+                        label = { Text("Describe the image / ပုံဖော်ပြချက်") },
+                        placeholder = { Text("A golden Burmese fantasy palace at sunset…") },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 2,
+                        maxLines = 4,
+                        enabled = !imageLoading
+                    )
+                    OutlinedTextField(
+                        value = imageApiKey,
+                        onValueChange = { imageApiKey = it },
+                        label = { Text("Image API Key") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        enabled = !imageLoading
+                    )
+                    OutlinedTextField(
+                        value = imageBaseUrl,
+                        onValueChange = { imageBaseUrl = it },
+                        label = { Text("Image API Base URL") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        enabled = !imageLoading
+                    )
+                    OutlinedTextField(
+                        value = imageModel,
+                        onValueChange = { imageModel = it },
+                        label = { Text("Image Model ID") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        enabled = !imageLoading
+                    )
+                    Text(
+                        "API သည် /images/generations endpoint နှင့် " +
+                            "data[0].url သို့မဟုတ် data[0].b64_json ကို ပံ့ပိုးရပါမည်။ " +
+                            "အသုံးပြုခ ရှိနိုင်သည်။",
+                        color = Muted,
+                        fontSize = 11.sp
+                    )
+
+                    if (imageLoading) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = Gold,
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("ပုံဖန်တီးနေပါတယ်…", color = White)
+                        }
+                    }
+
+                    if (previewBitmap != null) {
+                        Image(
+                            bitmap = previewBitmap.asImageBitmap(),
+                            contentDescription = "Generated image preview",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 220.dp)
+                        )
+                        TextButton(
+                            onClick = {
+                                saveImageLauncher.launch(
+                                    "GI-Image-${System.currentTimeMillis()}.png"
+                                )
+                            },
+                            enabled = !imageLoading
+                        ) {
+                            Text("↓ Save PNG to phone", color = Gold)
+                        }
+                    }
+
+                    if (generatedImages.isNotEmpty()) {
+                        Text("Recent images", color = Gold, fontWeight = FontWeight.Bold)
+                        Column(
+                            Modifier.heightIn(max = 100.dp),
+                            verticalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            generatedImages.take(8).forEach { item ->
+                                TextButton(
+                                    onClick = {
+                                        currentImagePath = item.path
+                                        imagePrompt = item.prompt
+                                        imageError = ""
+                                    },
+                                    enabled = !imageLoading
+                                ) {
+                                    Text(
+                                        "🖼 ${item.prompt.ifBlank { "Saved image" }.take(55)}",
+                                        color = White,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (imageError.isNotBlank()) {
+                        Text(imageError, color = Color(0xFFFF9C8D), fontSize = 12.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !imageLoading &&
+                        imagePrompt.isNotBlank() &&
+                        imageApiKey.isNotBlank() &&
+                        imageBaseUrl.isNotBlank() &&
+                        imageModel.isNotBlank(),
+                    onClick = {
+                        val prompt = imagePrompt.trim()
+                        val key = imageApiKey.trim()
+                        val base = imageBaseUrl.trim()
+                        val modelName = imageModel.trim()
+
+                        try {
+                            preferences.edit()
+                                .putString("image_api_key", SecureKey.encrypt(key))
+                                .putString("image_base_url", base)
+                                .putString("image_model", modelName)
+                                .apply()
+                        } catch (e: Exception) {
+                            imageError = "Image settings save failed: ${e.message}"
+                            return@TextButton
+                        }
+
+                        imageLoading = true
+                        imageError = ""
+                        Thread {
+                            try {
+                                val bytes = generateImageOpenAI(
+                                    base, key, modelName, prompt
+                                )
+                                val dir = File(context.filesDir, "gi_images")
+                                if (!dir.exists() && !dir.mkdirs()) {
+                                    throw IOException("Cannot create image storage directory.")
+                                }
+                                val stamp = System.currentTimeMillis()
+                                val imageFile = File(dir, "gi_image_$stamp.png")
+                                imageFile.writeBytes(bytes)
+                                File(dir, "gi_image_$stamp.txt")
+                                    .writeText(prompt, Charsets.UTF_8)
+
+                                activity.runOnUiThread {
+                                    generatedImages.add(
+                                        0,
+                                        GeneratedImage(
+                                            imageFile.absolutePath,
+                                            prompt,
+                                            stamp
+                                        )
+                                    )
+                                    while (generatedImages.size > 30) {
+                                        generatedImages.removeAt(generatedImages.lastIndex)
+                                    }
+                                    currentImagePath = imageFile.absolutePath
+                                    imageLoading = false
+                                    imageError = "ပုံဖန်တီးပြီးပါပြီ။ Save PNG ကိုနှိပ်ပြီး သိမ်းနိုင်ပါတယ်။"
+                                }
+                            } catch (e: Exception) {
+                                activity.runOnUiThread {
+                                    imageLoading = false
+                                    imageError = e.message ?: "Image generation failed."
+                                }
+                            }
+                        }.start()
+                    }
+                ) {
+                    Text("Generate Image ✨", color = Gold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { imageStudioOpen = false },
+                    enabled = !imageLoading
+                ) {
+                    Text("Close", color = Muted)
+                }
+            },
+            containerColor = Panel,
+            titleContentColor = Gold,
+            textContentColor = White
+        )
+    }
+
 }
